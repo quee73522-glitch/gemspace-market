@@ -1,80 +1,86 @@
-async function getMetadata(uri) {
-  if (!uri || !uri.startsWith("https://")) return {};
 
-  try {
-    const response = await fetch(uri, {
-      signal: AbortSignal.timeout(6000)
-    });
-
-    if (!response.ok) return {};
-
-    const data = await response.json();
-
-    return {
-      ...data,
-      image: data.image || data.image_url || data.preview || ""
-    };
-  } catch {
-    return {};
-  }
-}
-
-export async function onRequest({ request }) {
+export async function onRequest({ request, env }) {
   const cache = caches.default;
-  const cacheKey = new Request(request.url);
+  const cacheKey = new Request(request.url, { method: "GET" });
 
   const cached = await cache.match(cacheKey);
   if (cached) return cached;
 
-  try {
-    const url = new URL("https://toncenter.com/api/v3/nft/items");
-    url.searchParams.set("limit", "24");
-    url.searchParams.set("offset", "0");
+  if (!env.TONAPI_KEY) {
+    return Response.json(
+      { ok: false, error: "TONAPI_KEY is missing" },
+      { status: 500 }
+    );
+  }
 
-    const response = await fetch(url.toString());
+  const headers = {
+    Authorization: `Bearer ${env.TONAPI_KEY}`,
+    Accept: "application/json"
+  };
 
-    if (!response.ok) {
-      return Response.json({
-        ok: false,
-        error: "TON API unavailable",
-        code: response.status
-      }, { status: response.status });
-    }
-
-    const data = await response.json();
-    const items = data.nft_items || [];
-
-    for (let i = 0; i < items.length; i += 6) {
-      const batch = items.slice(i, i + 6);
-
-      await Promise.all(batch.map(async (nft) => {
-        const uri = nft.content?.uri;
-        const metadata = await getMetadata(uri);
-
-        nft.content = {
-          ...nft.content,
-          ...metadata
-        };
-      }));
-    }
-
-    const result = Response.json({
-      ...data,
-      nft_items: items
-    }, {
-      headers: {
-        "Cache-Control": "public, max-age=60, s-maxage=300"
-      }
+  async function api(path) {
+    const response = await fetch(`https://tonapi.io${path}`, {
+      headers,
+      signal: AbortSignal.timeout(12000)
     });
 
-    await cache.put(cacheKey, result.clone());
+    if (!response.ok) {
+      throw new Error(`TonAPI error: ${response.status}`);
+    }
 
+    return response.json();
+  }
+
+  try {
+    const collectionsData = await api(
+      "/v2/nfts/collections?limit=4&offset=0"
+    );
+
+    const collections = collectionsData.nft_collections || [];
+    const items = [];
+
+    for (const collection of collections) {
+      if (!collection.address) continue;
+
+      const data = await api(
+        `/v2/nfts/collections/${encodeURIComponent(collection.address)}/items?limit=15&offset=0`
+      );
+
+      for (const nft of data.nft_items || []) {
+        const metadata = nft.metadata || {};
+        const preview = nft.previews?.find(
+          p => p.resolution === "500x500"
+        ) || nft.previews?.[0];
+
+        items.push({
+          ...nft,
+          name: metadata.name || "TON NFT",
+          image: preview?.url || metadata.image || "",
+          content: {
+            ...metadata,
+            name: metadata.name || "TON NFT",
+            image: preview?.url || metadata.image || ""
+          }
+        });
+      }
+    }
+
+    const result = Response.json(
+      { ok: true, nft_items: items },
+      {
+        headers: {
+          "Cache-Control": "public, max-age=60, s-maxage=300"
+        }
+      }
+    );
+
+    await cache.put(cacheKey, result.clone());
     return result;
 
   } catch (error) {
-    return Response.json({
-      ok: false,
-      error: String(error)
-    }, { status: 502 });
+    return Response.json(
+      { ok: false, error: error.message },
+      { status: 502 }
+    );
   }
 }
