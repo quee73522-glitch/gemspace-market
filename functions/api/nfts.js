@@ -47,6 +47,7 @@ export async function onRequest({ request, env }) {
       );
 
       for (const nft of data.nft_items || []) {
+        if (nft.trust === "blacklist") continue;
         const metadata = nft.metadata || {};
         const preview = nft.previews?.find(
           p => p.resolution === "500x500"
